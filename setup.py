@@ -2,13 +2,13 @@ from distutils.core import setup
 
 setup(
     name='gridsim',
-    version='0.1.0',
+    version='0.1.1',
     author='Orion Pritchard',
     author_email='orionp@google.com',
     packages=['gridsim', 'gridsim.test'],
     scripts=[],
     url='http://www.google.com',
-    license='LICENSE.txt',
+    license='LICENSE',
     description='Files for simulating costs of electrical grid.',
     long_description=open('README.txt').read(),
     install_requires=[
