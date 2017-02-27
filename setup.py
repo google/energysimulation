@@ -11,6 +11,7 @@ setup(
     license='LICENSE',
     description='Files for simulating costs of electrical grid.',
     long_description=open('README.txt').read(),
+    include_package_data=True,
     install_requires=[
         'numpy >= 1.11.1',
         'pandas >= 0.18.1',
