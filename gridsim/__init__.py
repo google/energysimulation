@@ -2,12 +2,16 @@
 
 This package was originally written to support understanding of energy
 solutions within Google Research.  It has subsequently been used to
-generate scenarios for a website to help show policy makers, and other
-interested people, the cost optimal way to reduce CO2 emissions from
-the electricity sector.  This package has been released under
-open-source in order to fully document how the results of the website
-were determined and to help further understanding and analysis of
-energy costs.  See ../LICENSE for more details of the release.
+generate scenarios for a website
+
+(TODO:(orionp) Link to website)
+
+to help show policy makers, and other interested people, the cost
+optimal way to reduce CO2 emissions from the electricity sector.  This
+package has been released under open-source in order to fully document
+how the results of the website were determined and to help further
+understanding and analysis of energy costs.  See ../LICENSE for more
+details of the release.
 
 The reason for using this model is to avoid the limitations of
 Levelized Cost of Electricity (LCOE) which is a popular metric for
