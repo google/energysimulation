@@ -115,6 +115,11 @@ def configure_sources_and_storage(profile_dataframe,
                              co2_per_electrical_energy=dataframe_row['CO2'],
                              is_rps_source=is_rps_source)
 
+    # Because hydropower sites in the US have all mostly been used,
+    # assume no more hydropower can be built.
+    if source_name == 'HYDROPOWER':
+      source.max_power = profile_dataframe['HYDROPOWER'].max()
+
     # Non-dispatchable sources have profiles associated with them.
     if source_name in profile_dataframe.columns:
       lp.add_nondispatchable_sources(source)

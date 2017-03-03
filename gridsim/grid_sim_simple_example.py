@@ -181,6 +181,7 @@ def main():
   adjust_lp_policy(lp)
 
   if not lp.solve():
+    # Failure to solve is usually because of high RPS and no storage.
     raise ValueError('LP did not converge.')
 
   display_lp_results(lp)
