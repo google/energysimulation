@@ -1,19 +1,19 @@
-"""Copyright 2017 Google Inc.
+# Copyright 2017 Google Inc.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
-Example entry-point for using grid_sim_linear_program to analyize energy.
+"""Example entry-point for using grid_sim_linear_program to analyize energy.
 
 Populates and runs the linear program for a simple case of solar power
 and natural gas power.
@@ -24,6 +24,7 @@ import os.path as osp
 import grid_sim_linear_program as gslp
 
 import pandas as pd
+
 
 DATA_DIRECTORY = 'gridsim/data'
 
@@ -75,17 +76,18 @@ def adjust_lp_policy(lp,
                      renewable_portfolio_percentage=30,
                      annual_discount_rate=0.06,
                      lifetime_in_years=30):
-  """Configures the lp based upon macro-economic costs and policy.
+  """Configures the LP based upon macro-economic costs and policy.
 
   Args:
     lp: LinearProgramContainer
     carbon_tax: Float cost of emitting co2 in $ / Tonne-of-CO2.
       Default is no carbon tax.
 
-    renewable_portfolio_percentage: 0. <= Float <= 100.; Percentage of
-      total generation which must come from rps_sources.  LP may not
-      convergeIf this is set to a high amount without any storage
-      elements in the LP.  Default is 30%.
+    renewable_portfolio_percentage: 0. <= Float <= 100. Percentage of
+      total generation which must come from sources in the Renewable
+      Portfolio Standard.  LP may not converge if this is set to a
+      high amount without any storage elements in the LP.  Default is
+      30%.
 
     annual_discount_rate: interest rate used in discounted cash flow
       analysis to determine the present value of future costs. Default
@@ -129,18 +131,18 @@ def display_lp_results(lp):
     total_source_cost = capital_cost + fuel_cost
 
     print """SOURCE: %s
-  Capacity: %f Megawatts,
-  Generated: %f Megawatt-hours,
-  Emitted: %f Tonnes of CO2,
-  Capital Cost: $%f,
-  Fuel Cost: $%f,
-  Total Cost: $%f""" % (source.name,
-                        capacity,
-                        generated,
-                        co2,
-                        capital_cost,
-                        fuel_cost,
-                        total_source_cost)
+  Capacity: %.2f Megawatts,
+  Generated: %.2f Megawatt-hours,
+  Emitted: %.2f Tonnes of CO2,
+  Capital Cost: $%.2f,
+  Fuel Cost: $%.2f,
+  Total Cost: $%.2f""" % (source.name,
+                          capacity,
+                          generated,
+                          co2,
+                          capital_cost,
+                          fuel_cost,
+                          total_source_cost)
 
     system_cost += total_source_cost
     system_co2 += co2
@@ -156,19 +158,19 @@ def display_lp_results(lp):
          charge_capacity * storage.sink.nameplate_unit_cost,
          discharge_capacity * storage.source.nameplate_unit_cost])
     print """STORAGE: %s
-  Capacity: %f Megawatt-hours,
-  Maximum Charge Power: %f Megawatts,
-  Maximum Discharge Power: %f Megawatts,
-  Total Cost: $%f""" % (storage.name,
-                        capacity,
-                        charge_capacity,
-                        discharge_capacity,
-                        storage_cost)
+  Capacity: %.2f Megawatt-hours,
+  Maximum Charge Power: %.2f Megawatts,
+  Maximum Discharge Power: %.2f Megawatts,
+  Total Cost: $%.2f""" % (storage.name,
+                          capacity,
+                          charge_capacity,
+                          discharge_capacity,
+                          storage_cost)
     system_cost += storage_cost
     system_co2 += co2
 
-  print 'SYSTEM_COST: $%f' % system_cost
-  print 'SYSTEM_CO2: %f Tonnes' % system_co2
+  print 'SYSTEM_COST: $%.2f' % system_cost
+  print 'SYSTEM_CO2: %.2f Tonnes' % system_co2
 
 
 def main():
@@ -181,8 +183,8 @@ def main():
   adjust_lp_policy(lp)
 
   if not lp.solve():
-    # Failure to solve is usually because of high RPS and no storage.
-    raise ValueError('LP did not converge.')
+    raise ValueError("""LP did not converge.
+Failure to solve is usually because of high RPS and no storage.""")
 
   display_lp_results(lp)
 
