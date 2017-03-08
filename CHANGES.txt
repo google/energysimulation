@@ -1,2 +1,3 @@
 v0.1.0, 12/12/2016 -- Initial release.
-v0.1.1, 12/27/2016 -- Moved LICENSE.txt to LICENSE per google open-source cross check.
+v0.1.1, 03/01/2017 -- Moved LICENSE.txt to LICENSE per google open-source cross check.
+v0.1.3, 03/08/2016 -- Removed protobuf support

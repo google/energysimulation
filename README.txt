@@ -10,21 +10,39 @@ simple LCOE (Levelized Cost of Energy) simulations which assume the
 fungibility of energy.  E.g. An LCOE analysis wouldn't consider that
 solar power cannot provide power in the darkest of night.
 
-More information about this approach is available at
-(TODO:(orionp) link to John's paper).
+This logic provided the basis for the paper "Analyzing energy
+technologies and policies using DOSCOE by John C. Platt and J. Orion
+Pritchard".
 
+It is also the basis for data shown on the website
+http://energystrategies.org
 
 ===========
 Installation
 ===========
 
+Dependencies:
+  Grid Sim is dependent on the following packages.
+  - numpy
+  - pandas
+  - protobuf
+  - ortools
+
+  All packages are downloadable via PyPi.  When testing installation
+  on a linux workstation a simple pip-install of the tarball installed
+  everything except for ortools.  Since the recent bundles of ortools
+  were in egg form, installing ortools via easy-install proved a
+  suitable workaround for this problem.
+  
 ===========
 Source Tree
 ===========
 
 - grid_sim_linear_program.py: Energy Grid objects wrapped around a linear-program
 - grid_configuration_pb2.py: compiled protobufs for grid_sim_linear_program.py
-- grid_sim_example.py: Executable python script which runs an example grid simulation. (TODO:(orionp) write script.)
+- grid_sim_simple_example.py: Executable python script which runs a simple grid simulation.
+- grid_sim_website_example.py: Executable python script which runs a
+    grid simulation using the input data on the energystrategies.org website.
 + data: data used to generate scenarios for website simulations
   + profiles:
     - profiles_<region>.csv: source and demand profiles for a particular
