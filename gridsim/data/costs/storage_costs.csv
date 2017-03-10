@@ -1,0 +1,3 @@
+,fixed,charge_efficiency,discharge_efficiency,charge_capital,discharge_capital
+HYDROGEN,180,0.79,0.45,460000,813000
+ELECTROCHEMICAL,187000,0.9,0.9,100000,100000
