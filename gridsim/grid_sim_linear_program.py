@@ -52,7 +52,7 @@ import logging
 import numpy as np
 
 from ortools.linear_solver import pywraplp
-import grid_configuration_pb2 as gcp
+
 
 class GridSimError(RuntimeError):
   pass
@@ -1321,7 +1321,7 @@ class LinearProgramContainer(object):
     # Scale solver_precision by number of timeslices to get precision
     # for a summed comparison.
     sum_solver_precision = solver_precision * self.number_of_timeslices
-    if (sum_solver_precision + sum_rps_credits < rps_target):
+    if sum_solver_precision + sum_rps_credits < rps_target:
       raise RpsPercentNotMetError(
           'Sum RPS credits (%f) < demand * (%f rps_percent) (%f)' %(
               sum_rps_credits,

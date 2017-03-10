@@ -21,12 +21,17 @@ and natural gas power.
 
 import os.path as osp
 
+import distutils.sysconfig as sysconfig
+
 import grid_sim_linear_program as gslp
 
 import pandas as pd
 
 
-DATA_DIRECTORY = 'gridsim/data'
+def get_data_directory():
+  """Returns a path to grid_sim data in site-lib packages."""
+
+  return [sysconfig.get_python_lib(), 'gridsim', 'data']
 
 
 def simple_lp(profile_dataframe):
@@ -42,17 +47,25 @@ def simple_lp(profile_dataframe):
 
   lp = gslp.LinearProgramContainer(profile_dataframe)
 
+
+  # Must specify a demand to put proper load on the grid.  GridDemand
+  # is linked to the corresponding profile:
+  # lp.profiles[GridDemand.name]
+
+  lp.add_demands(gslp.GridDemand('DEMAND'))
+
   # Nondispatchable sources are intermittent and have profiles which
   # describe their availability.  Building more capacity of these
   # sources scales the profile but cannot provide power when the
   # profile is 0. (e.g. Solar power in the middle of the night, Wind
-  # power during a lull))
+  # power during a lull)).  A nondispatchable GridSource is linked to
+  # its corresponding profile, profile[GridSource.name]
 
   lp.add_nondispatchable_sources(
       gslp.GridSource(
           name='SOLAR',  # Matches profile column name for nondispatch.
-          capital=946000,  # Aggressive solar cost $/MW
-          variable=0,  # No fuel cost.
+          nameplate_unit_cost=946000,  # Aggressive solar cost $/MW
+          variable_unit_cost=0,  # No fuel cost.
           co2_per_electrical_energy=0,  # Clean energy.
           is_rps_source=True))  # In Renewable Portfolio Standard
 
@@ -63,8 +76,8 @@ def simple_lp(profile_dataframe):
   lp.add_dispatchable_sources(
       gslp.GridSource(
           name='NG',  # Dispatchable, so no name restriction.
-          capital=1239031,  # Cost for a combined cycle plant. $/MW
-          variable=17.5,  # Cheap fuel costs assumes fracking. $/MWh
+          nameplate_unit_cost=1239031,  # Cost for a combined cycle plant. $/MW
+          variable_unit_cost=17.5,  # Cheap fuel costs assumes fracking. $/MWh
           co2_per_electrical_energy=0.33,  # Tonnes CO2 / MWh
           is_rps_source=False))  # Not in Renewable Portfolio Standard.
 
@@ -120,22 +133,22 @@ def display_lp_results(lp):
   system_co2 = 0
 
   # Loop over sources and display results.
-  sources = lp.dispatchable_sources + lp.nondispatchable_sources
+  sources = lp.sources
   for source in sources:
     capacity = source.get_nameplate_solution_value()
     generated = sum(source.get_solution_values())
-    co2 = lp.co2_per_electrical_energy * generated
-    capital_cost = lp.nameplate_unit_cost * capacity
-    fuel_cost = (lp.variable_unit_cost * generated +
+    co2 = source.co2_per_electrical_energy * generated
+    capital_cost = source.nameplate_unit_cost * capacity
+    fuel_cost = (source.variable_unit_cost * generated +
                  co2 * lp.carbon_tax) * lp.cost_of_money
     total_source_cost = capital_cost + fuel_cost
 
     print """SOURCE: %s
-  Capacity: %.2f Megawatts,
-  Generated: %.2f Megawatt-hours,
-  Emitted: %.2f Tonnes of CO2,
-  Capital Cost: $%.2f,
-  Fuel Cost: $%.2f,
+  Capacity: %.2f Megawatts
+  Generated: %.2f Megawatt-hours
+  Emitted: %.2f Tonnes of CO2
+  Capital Cost: $%.2f
+  Fuel Cost: $%.2f
   Total Cost: $%.2f""" % (source.name,
                           capacity,
                           generated,
@@ -158,9 +171,9 @@ def display_lp_results(lp):
          charge_capacity * storage.sink.nameplate_unit_cost,
          discharge_capacity * storage.source.nameplate_unit_cost])
     print """STORAGE: %s
-  Capacity: %.2f Megawatt-hours,
-  Maximum Charge Power: %.2f Megawatts,
-  Maximum Discharge Power: %.2f Megawatts,
+  Capacity: %.2f Megawatt-hours
+  Maximum Charge Power: %.2f Megawatts
+  Maximum Discharge Power: %.2f Megawatts
   Total Cost: $%.2f""" % (storage.name,
                           capacity,
                           charge_capacity,
@@ -175,8 +188,8 @@ def display_lp_results(lp):
 
 def main():
 
-  profiles_file = osp.join(DATA_DIRECTORY, 'profiles',
-                           'profiles_california.csv')
+  profiles_path = get_data_directory() + ['profiles', 'profiles_california.csv']
+  profiles_file = osp.join(*profiles_path)
 
   profiles = pd.read_csv(profiles_file, index_col=0, parse_dates=True)
   lp = simple_lp(profiles)

@@ -15,8 +15,11 @@
 
 """Example entry-point for using grid_sim_linear_program.
 
-Analyzes energy as it was done by the website.  First time users are
-encouraged to look at grid_sim_simple_example.py first.
+Analyzes energy as it was done by the website
+http://energystrategies.org.
+
+First time users are encouraged to look at grid_sim_simple_example.py
+first.
 """
 
 
@@ -33,7 +36,8 @@ def configure_sources_and_storage(profile_dataframe,
                                   storage_dataframe,
                                   source_dict_index,
                                   storage_names,
-                                  rps_names):
+                                  rps_names,
+                                  hydrolimits=None):
   """Generates a LinearProgramContainer similar to the website.
 
   Args:
@@ -97,6 +101,9 @@ def configure_sources_and_storage(profile_dataframe,
     rps_names: A list of source names which should be considered in
       the Renewable Portfolio Standard.
 
+    hydrolimits: A dict with 'max_power' and 'max_energy' keys.  If
+      specified, hydropower will be limited to this power and energy.
+
   Returns:
     A LinearProgramContainer suitable for simulating.
   """
@@ -117,10 +124,18 @@ def configure_sources_and_storage(profile_dataframe,
                              co2_per_electrical_energy=dataframe_row['CO2'],
                              is_rps_source=is_rps_source)
 
-    # Because hydropower sites in the US have all mostly been used,
-    # assume no more hydropower can be built.
-    if source_name == 'HYDROPOWER':
-      source.max_power = profile_dataframe['HYDROPOWER'].max()
+    # For energystrategies.org we assumed that the prime hydropower
+    # sites have already been developed and built.  So for hydropower
+    # sites, we make the capital cost 0.  Here we limit the LP to only
+    # use as much power and energy as existing sites already provide.
+    # Without this limitation and with capital cost of 0, the LP will
+    # assume an infinite supply of cheap hydropower and fulfill demand
+    # with 100% hydropower.
+
+    if hydrolimits is not None:
+      if source_name == 'HYDROPOWER':
+        source.max_power = hydrolimits['max_power']
+        source.max_energy = hydrolimits['max_energy']
 
     # Non-dispatchable sources have profiles associated with them.
     if source_name in profile_dataframe.columns:
@@ -145,16 +160,23 @@ def configure_sources_and_storage(profile_dataframe,
 
 def main():
 
-  profiles_file = osp.join(simple.DATA_DIRECTORY, 'profiles',
-                           'profiles_california.csv')
-  source_costs_file = osp.join(simple.DATA_DIRECTORY,
-                               'costs', 'source_costs.csv')
-  storage_costs_file = osp.join(simple.DATA_DIRECTORY,
-                                'costs', 'storage_costs.csv')
+  region = 'california'
+
+  data_dir = simple.get_data_directory()
+  profiles_path = data_dir[:] + ['profiles', 'profiles_%s.csv' % region]
+  source_cost_path = data_dir[:] + ['costs', 'source_costs.csv']
+  storage_cost_path = data_dir[:] + ['costs', 'storage_costs.csv']
+  hydrolimits_path =  data_dir[:] + ['costs', 'regional_hydro_limits.csv']
+
+  profiles_file = osp.join(*profiles_path)
+  source_costs_file = osp.join(*source_cost_path)
+  storage_costs_file = osp.join(*storage_cost_path)
+  hydro_limits_file = osp.join(*hydrolimits_path)
 
   profiles_dataframe = pd.read_csv(profiles_file, index_col=0, parse_dates=True)
   source_costs_dataframe = pd.read_csv(source_costs_file, index_col=0)
   storage_costs_dataframe = pd.read_csv(storage_costs_file, index_col=0)
+  hydrolimits_dataframe = pd.read_csv(hydro_limits_file, index_col=0)
 
   ng_cost_index = 0
   cost_settings = {
@@ -177,7 +199,9 @@ def main():
       storage_dataframe=storage_costs_dataframe,
       source_dict_index=cost_settings,
       storage_names=storage_names,
-      rps_names=rps_names)
+      rps_names=rps_names,
+      hydrolimits = hydrolimits_dataframe.loc[region]
+  )
 
   simple.adjust_lp_policy(
       lp,
@@ -186,6 +210,7 @@ def main():
       annual_discount_rate=0.06,  # 6% annual discount rate.
       lifetime_in_years=30)  # 30 year lifetime
 
+  print 'Solving may take a few minutes...'
   if not lp.solve():
     raise ValueError("""LP did not converge.
 Failure to solve is usually because of high RPS and no storage.""")
