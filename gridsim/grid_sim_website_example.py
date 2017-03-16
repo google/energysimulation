@@ -163,10 +163,10 @@ def main():
   region = 'california'
 
   data_dir = simple.get_data_directory()
-  profiles_path = data_dir[:] + ['profiles', 'profiles_%s.csv' % region]
-  source_cost_path = data_dir[:] + ['costs', 'source_costs.csv']
-  storage_cost_path = data_dir[:] + ['costs', 'storage_costs.csv']
-  hydrolimits_path =  data_dir[:] + ['costs', 'regional_hydro_limits.csv']
+  profiles_path = data_dir + ['profiles', 'profiles_%s.csv' % region]
+  source_cost_path = data_dir + ['costs', 'source_costs.csv']
+  storage_cost_path = data_dir + ['costs', 'storage_costs.csv']
+  hydrolimits_path = data_dir + ['costs', 'regional_hydro_limits.csv']
 
   profiles_file = osp.join(*profiles_path)
   source_costs_file = osp.join(*source_cost_path)
@@ -200,7 +200,7 @@ def main():
       source_dict_index=cost_settings,
       storage_names=storage_names,
       rps_names=rps_names,
-      hydrolimits = hydrolimits_dataframe.loc[region]
+      hydrolimits=hydrolimits_dataframe.loc[region]
   )
 
   simple.adjust_lp_policy(

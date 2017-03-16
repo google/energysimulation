@@ -31,7 +31,8 @@ import pandas as pd
 def get_data_directory():
   """Returns a path to grid_sim data in site-lib packages."""
 
-  return [sysconfig.get_python_lib(), 'gridsim', 'data']
+  abs_package_path = osp.dirname(gslp.__file__)
+  return [abs_package_path, 'data']
 
 
 def simple_lp(profile_dataframe):
@@ -189,7 +190,7 @@ def display_lp_results(lp):
 def main():
 
   profiles_path = get_data_directory() + ['profiles', 'profiles_california.csv']
-  profiles_file = osp.join(*profiles_path)
+  profiles_file = osp.join(profiles_path)
 
   profiles = pd.read_csv(profiles_file, index_col=0, parse_dates=True)
   lp = simple_lp(profiles)
