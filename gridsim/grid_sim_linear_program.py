@@ -371,31 +371,6 @@ class GridSource(object):
 
     return nameplate_variable.solution_value()
 
-  def populate_result_protobuf(self, result,
-                               consumption_coefficient,
-                               populate_solutions=False):
-    """Populate results protobuf with results.
-
-    Args:
-      result: The GridConfiguration Results protobuf.
-      consumption_coefficient: An np.array float which represents what
-        fraction of source total energy is considered consumed.
-      populate_solutions: Boolean which determines if results include
-        time-slice solution values.
-    """
-
-    solution_values = self.get_solution_values()
-
-    source_result = result.sources.add()
-    source_result.name = self.name
-    source_result.nameplate = self.get_nameplate_solution_value()
-    source_result.total = sum(solution_values)
-    source_result.consumed = sum(solution_values * consumption_coefficient)
-
-    if populate_solutions:
-      for value in solution_values:
-        source_result.solution_values.append(value)
-
 
 class _GridSourceDispatchableSolver(object):
   """Power Source which can provide power at any time.
@@ -918,45 +893,6 @@ class GridStorage(object):
     return np.array([v.solution_value()
                      for v in timeslice_variables])
 
-  def populate_result_protobuf(self, result, populate_solutions=False):
-    """Populate results protobuf with results.
-
-    Args:
-      result: The GridConfiguration Results protobuf.
-      populate_solutions: Boolean which determines if results include
-        time-slice solution values.
-    """
-
-    storage_result = result.storage.add()
-    storage_result.name = self.name
-    storage_result.nameplate = self.get_nameplate_solution_value()
-    storage_solution_values = self.get_solution_values()
-    storage_result.total = sum(storage_solution_values)
-
-    storage_result.source.name = self.source.name
-    storage_result.source.nameplate = (
-        self.source.get_nameplate_solution_value())
-    source_solution_values = self.source.get_solution_values()
-    storage_result.source.total = sum(source_solution_values *
-                                      self.discharge_efficiency)
-    storage_result.source.consumed = storage_result.source.total
-
-    storage_result.sink.name = self.sink.name
-    storage_result.sink.nameplate = (
-        self.sink.get_nameplate_solution_value())
-    sink_solution_values = self.sink.get_solution_values()
-    storage_result.sink.total = sum(sink_solution_values *
-                                    self.discharge_efficiency)
-
-    storage_result.sink.consumed = storage_result.sink.total
-
-    if populate_solutions:
-      for result, values in [(storage_result, storage_solution_values),
-                             (storage_result.source, source_solution_values),
-                             (storage_result.sink, sink_solution_values)]:
-        for value in values:
-          result.solution_values.append(value)
-
 
 class _GridTransmission(GridSource):
   """Shuttles power from one time-zone to another."""
@@ -1143,25 +1079,6 @@ class GridTransmission(object):
 
     self.a_to_b.post_process(lp)
     self.b_to_a.post_process(lp)
-
-  def populate_result_protobuf(self, result, populate_solutions=False):
-    """Populate results protobuf with results.
-
-    Args:
-      result: The GridConfiguration Results protobuf.
-      populate_solutions: Boolean which determines if results include
-        time-slice solution values.
-    """
-
-    t = result.transmission.add()
-    t.name = self.name
-    t.nameplate = self.a_to_b.get_nameplate_solution_value()
-
-    if populate_solutions:
-      for value in self.a_to_b.get_solution_values():
-        t.solution_values_a_to_b.append(value)
-      for value in self.b_to_a.get_solution_values():
-        t.solution_values_b_to_a.append(value)
 
 
 class LinearProgramContainer(object):
@@ -1508,16 +1425,10 @@ class LinearProgramContainer(object):
     for s in self.sources + self.storage + self.transmission:
       s.configure_lp_variables_and_constraints(self)
 
-  def solve(self, results_protobuf=None, populate_solutions=False):
+  def solve(self):
     """Initializes and runs linear program.
 
     This is the main routine to call after __init__.
-
-    Args:
-      results_protobuf: Optional results_protobuf which will be
-        populated with results if specified.
-      populate_solutions: Boolean which determines if results include
-        time-slice solution values.
 
     Returns:
       True if linear program gave an optimal result.  False otherwise.
@@ -1526,13 +1437,8 @@ class LinearProgramContainer(object):
     status = self.solver.Solve()
     converged = status == self.solver.OPTIMAL
 
-    if results_protobuf is not None:
-      results_protobuf.converged = converged
-      results_protobuf.cost_of_money = self.cost_of_money
-
     if converged:
       self._post_process()
-      self.populate_result_protobuf(results_protobuf, populate_solutions)
 
     return converged
 
@@ -1623,67 +1529,6 @@ class LinearProgramContainer(object):
               rps_target
           )
       )
-
-  def populate_result_protobuf(self, result, populate_solutions=False):
-    """Populate results protobuf with results.
-
-    Args:
-      result: The GridConfiguration Results protobuf.
-      populate_solutions: Boolean which determines if results include
-        time-slice solution values.
-
-    Raises:
-      ValueError: If any consumption coefficients are infinity.
-    """
-
-    if result is not None:
-      rps_consumption_coefficients = {}
-      non_rps_consumption_coefficients = {}
-
-      # Build consumption coefficients.  The strategy is: if rps, then
-      # fill demand with equally proportioned amounts of rps sources
-      # first.  Fill remaining demand with equally proportioned amounts
-      # of non-rps-sources.
-
-      use_rps = self.rps_percent > 0.0
-
-      for g_id in [d.grid_region_id for d in self.demands]:
-        remaining_demand = self.adjusted_demand[g_id]
-        remaining_demand[remaining_demand < 0.0] = 0.0
-
-        if use_rps:
-          rps_total = self.rps_total[g_id]
-          rps_consumption_coefficients[g_id] = np.where(
-              rps_total > remaining_demand,
-              remaining_demand / rps_total,
-              1.0)
-
-          if np.isinf(rps_consumption_coefficients[g_id]).any():
-            raise ValueError('rps_consumption_coeff is inf.')
-
-          remaining_demand -= rps_total
-          remaining_demand[remaining_demand < 0.0] = 0.0
-
-        non_rps_total = self.non_rps_total[g_id]
-        non_rps_consumption_coefficients[g_id] = np.where(
-            non_rps_total > remaining_demand,
-            remaining_demand / non_rps_total,
-            1.0)
-        if np.isinf(non_rps_consumption_coefficients[g_id]).any():
-          raise ValueError('non_rps_consumption_coeff is inf.')
-
-      for source in self.sources:
-        coeff = (rps_consumption_coefficients[source.grid_region_id]
-                 if use_rps and source.is_rps_source
-                 else non_rps_consumption_coefficients[source.grid_region_id])
-
-        source.populate_result_protobuf(result, coeff, populate_solutions)
-
-      for storage in self.storage:
-        storage.populate_result_protobuf(result, populate_solutions)
-
-      for transmission in self.transmission:
-        transmission.populate_result_protobuf(result, populate_solutions)
 
   def declare_timeslice_variables(self, name, grid_region_id):
     """Declares timeslice variables for a grid_region.

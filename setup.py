@@ -16,7 +16,7 @@ from distutils.core import setup
 
 setup(
     name='gridsim',
-    version='0.1.3',
+    version='0.1.4',
     author='Orion Pritchard',
     author_email='orionp@google.com',
     packages=['gridsim', 'gridsim.test'],

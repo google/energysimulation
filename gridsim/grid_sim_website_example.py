@@ -13,15 +13,33 @@
 # limitations under the License.
 
 
-"""Example entry-point for using grid_sim_linear_program.
-
-Analyzes energy as it was done by the website
-http://energystrategies.org.
+"""Partial Example of using grid_sim_linear_program to match website results.
 
 First time users are encouraged to look at grid_sim_simple_example.py
 first.
+
+Analyzes energy similarly to how it was done for the backend to the
+website http://energystrategies.org.  Note that this only calculates
+for one out of the thirteen regions classified by the EIA.  To match
+the results from the site, you must sum the results from all 13
+regions as defined in REGION_HUBS.keys()
+
+This backend uses a linear program to optimize the cheapest way to
+generate electricity subject to certain constraints.  The constraints
+are:
+  1. Hourly generation must always exceed demand.  AKA.  Keep the lights on.
+  2. Solution must have some percentage [0, 100] of power from a
+     'Renewable Portfolio Standard' (RPS).  Different RPS have
+     different standards so the code allows the user to specify which
+     sources to put in the RPS.
+
+Other factors which affect the linear program output include:
+  1. Source fixed and variable costs. ($ / MW and $ / MWH respectively)
+  2. Source CO2 per Mwh if there is a Carbon Tax (Tonnes / MWh)
+  3. Carbon Tax Value ($ / Tonne)
 """
 
+import math
 
 import os.path as osp
 
@@ -31,7 +49,92 @@ import grid_sim_simple_example as simple
 import pandas as pd
 
 
-def configure_sources_and_storage(profile_dataframe,
+# Where to base a HVDC line.
+# key:region, value: (latitude, longitude) in decimal degrees
+REGION_HUBS = {'southwest': (33.4484, 112.0740),  # Phoenix
+               'midatlantic': (40.4406, 79.9959),  # Pittsburgh
+               'tva': (36.1627, 86.7816),  # Nashville
+               'midwest': (39.0997, 94.5786),  # Kansas City
+               'nyiso': (40.7128, 74.0059),  # New York City
+               'ercot': (30.2672, 97.7431),  # Austin
+               'northwest': (47.6062, 122.3321),  # Seattle
+               'central': (41.2524, 95.9980),  # Omaha
+               'carolinas': (35.2271, 80.8431),  # Charlotte
+               'southeast': (33.5207, 86.8025),  # Birmingham
+               'florida': (33.5207, 86.8025),  # Orlando
+               'neiso': (33.5207, 86.8025),  # Boston
+               'california': (34.0522, 118.2437)}  # Los Angeles
+
+
+def circle_route_distance(coordinates1, coordinates2):
+  """Calculate the spherical distance between two coordinates on earth.
+
+  As described in https://en.wikipedia.org/wiki/Great-circle_distance
+
+  Args:
+    coordinates1: A tuple containint (latitude, longitude) in decimal
+      degrees of point 1.
+    coordinates2: A tuple containint (latitude, longitude) in decimal
+      degrees of point 2.
+
+  Returns:
+    Distance on earth in kilometers between the two points.
+  """
+
+  lat1, lon1 = coordinates1
+  lat2, lon2 = coordinates2
+
+  # Convert to radians.
+  lat1 *= math.pi / 180.
+  lon1 *= math.pi / 180.
+  lat2 *= math.pi / 180.
+  lon2 *= math.pi / 180.
+
+  delta_lat = abs(lat2 - lat1)
+  delta_lon = abs(lon2 - lon1)
+
+  # Result angle (asin) cannot be computed if point is exactly on
+  # opposite side of earth, so special case out that point.  All other
+  # values can be correctly calculated with the haversine, even values
+  # close to 0, pi.
+  if delta_lat == math.pi and delta_lon == math.pi:
+    result_angle = math.pi
+  else:
+    haversine_lat = math.sin(delta_lat / 2) ** 2
+    haversine_lon = math.sin(delta_lon / 2) ** 2
+    result_angle = 2 * math.asin(math.sqrt(
+        haversine_lat + math.cos(lat1) * math.cos(lat2) * haversine_lon))
+
+  earth_radius_km = 6371
+  return earth_radius_km * result_angle
+
+
+def get_transmission_cost_efficiency(coordinates1, coordinates2):
+  """Return transmission capital cost $/MW and transmission efficiency.
+
+  Args:
+    coordinates1: A tuple containint (latitude, longitude) in decimal
+      degrees of point 1.
+    coordinates2: A tuple containint (latitude, longitude) in decimal
+      degrees of point 2.
+
+  Returns:
+    A tuple containing (cost $/MW, efficiency) elements.
+  """
+
+  # Assumptions: HVDC is 97% efficient / 1000 km with
+  # Costs: $334 / km / MWh
+
+  distance_km = circle_route_distance(coordinates1, coordinates2)
+  capital_cost_per_mw = distance_km * 334
+
+  efficiency = pow(0.97, distance_km / 1000)
+
+  return (capital_cost_per_mw, efficiency)
+
+
+def configure_sources_and_storage(profile_directory,
+                                  region,
                                   source_dataframe,
                                   storage_dataframe,
                                   source_dict_index,
@@ -41,8 +144,12 @@ def configure_sources_and_storage(profile_dataframe,
   """Generates a LinearProgramContainer similar to the website.
 
   Args:
-    profile_dataframe: A pandas dataframe with source and demand names
-      in the column header.  Hour of year in indexed column-0.
+    profile_directory: String filepath where profile files of the form
+      profile_<region>.csv exist.  Acceptable values of <region> are
+      REGION_HUBS.keys().
+
+    region: String name of the region to generate simulation for.
+      Acceptable values are REGION_HUBS.keys().
 
     source_dataframe: A pandas dataframe with source names in indexed
       column-0.
@@ -105,20 +212,27 @@ def configure_sources_and_storage(profile_dataframe,
       specified, hydropower will be limited to this power and energy.
 
   Returns:
-    A LinearProgramContainer suitable for simulating.
+    A Configured LinearProgramContainer suitable for simulating.
   """
+  profiles_file = osp.join(profile_directory, 'profiles_usa.csv')
 
-  lp = gslp.LinearProgramContainer(profile_dataframe)
+  profiles_dataframe = pd.read_csv(profiles_file, index_col=0, parse_dates=True)
 
-  # Specify grid load or demand which has a profile in profile_dataframe.DEMAND
-  lp.add_demands(gslp.GridDemand('DEMAND'))
+  lp = gslp.LinearProgramContainer(profiles_dataframe)
+
+  # Specify grid load or demand which has a profile in
+  # profile_dataframe.<region>_DEMAND
+  lp.add_demands(gslp.GridDemand('%s_DEMAND' % region.upper()))
 
   # Configure dispatchable and non-dispatchable sources.
   for source_name, source_index in source_dict_index.iteritems():
     dataframe_row = source_dataframe.loc['%s_%d' % (source_name, source_index)]
     is_rps_source = source_name in rps_names
 
-    source = gslp.GridSource(name=source_name,
+    # Adjust source_name by region to match profiles and to
+    # differentiate it from sources from other regions.
+    regional_source_name = '%s_%s' % (region.upper(), source_name)
+    source = gslp.GridSource(name=regional_source_name,
                              nameplate_unit_cost=dataframe_row['fixed'],
                              variable_unit_cost=dataframe_row['variable'],
                              co2_per_electrical_energy=dataframe_row['CO2'],
@@ -138,10 +252,36 @@ def configure_sources_and_storage(profile_dataframe,
         source.max_energy = hydrolimits['max_energy']
 
     # Non-dispatchable sources have profiles associated with them.
-    if source_name in profile_dataframe.columns:
+    if regional_source_name in profiles_dataframe.columns:
       lp.add_nondispatchable_sources(source)
     else:
       lp.add_dispatchable_sources(source)
+
+  # Add Solar and Wind from other regions.  Adjust by additional
+  # transmission costs and efficiency losses for distance traveled if
+  # Solar and Wind are in the simulation.  The website assumes Solar
+  # and Wind are always present.
+
+  for other_region in REGION_HUBS:
+    if other_region != region:
+      transmission_cost, efficiency = get_transmission_cost_efficiency(
+          REGION_HUBS[region],
+          REGION_HUBS[other_region])
+
+      for source in ['SOLAR', 'WIND']:
+        if source in source_dict_index:
+          cost_row = source_dataframe.loc['%s_%d'
+                                          % (source,
+                                             source_dict_index[source])]
+          lp.add_nondispatchable_sources(
+              gslp.GridSource(
+                  name='%s_%s' % (other_region.upper(), source),
+                  nameplate_unit_cost=cost_row['fixed'] + transmission_cost,
+                  variable_unit_cost=cost_row['variable'],
+                  co2_per_electrical_energy=cost_row['CO2'],
+                  is_rps_source=True,
+                  power_coefficient=efficiency)
+          )
 
   for storage_name in storage_names:
     dataframe_row = storage_dataframe.loc[storage_name]
@@ -163,17 +303,15 @@ def main():
   region = 'california'
 
   data_dir = simple.get_data_directory()
-  profiles_path = data_dir + ['profiles', 'profiles_%s.csv' % region]
   source_cost_path = data_dir + ['costs', 'source_costs.csv']
   storage_cost_path = data_dir + ['costs', 'storage_costs.csv']
   hydrolimits_path = data_dir + ['costs', 'regional_hydro_limits.csv']
+  profile_path = data_dir + ['profiles']
 
-  profiles_file = osp.join(*profiles_path)
   source_costs_file = osp.join(*source_cost_path)
   storage_costs_file = osp.join(*storage_cost_path)
   hydro_limits_file = osp.join(*hydrolimits_path)
 
-  profiles_dataframe = pd.read_csv(profiles_file, index_col=0, parse_dates=True)
   source_costs_dataframe = pd.read_csv(source_costs_file, index_col=0)
   storage_costs_dataframe = pd.read_csv(storage_costs_file, index_col=0)
   hydrolimits_dataframe = pd.read_csv(hydro_limits_file, index_col=0)
@@ -193,8 +331,10 @@ def main():
   storage_names = ['ELECTROCHEMICAL']
   rps_names = ['SOLAR', 'WIND']
 
+  profile_directory = osp.join(*profile_path)
   lp = configure_sources_and_storage(
-      profile_dataframe=profiles_dataframe,
+      region=region,
+      profile_directory=profile_directory,
       source_dataframe=source_costs_dataframe,
       storage_dataframe=storage_costs_dataframe,
       source_dict_index=cost_settings,
