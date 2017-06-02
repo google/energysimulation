@@ -165,12 +165,12 @@ def display_lp_results(lp):
   for storage in lp.storage:
     capacity = storage.get_nameplate_solution_value()
     unused_stored = storage.get_solution_values()
-    charge_capacity = storage.sink.get_nameplate_solution_value()
-    discharge_capacity = storage.source.get_nameplate_solution_value()
+    charge_capacity = storage.charge_nameplate.solution_value()
+    discharge_capacity = storage.discharge_nameplate.solution_value()
     storage_cost = sum(
         [capacity * storage.storage_nameplate_cost,
-         charge_capacity * storage.sink.nameplate_unit_cost,
-         discharge_capacity * storage.source.nameplate_unit_cost])
+         charge_capacity * storage.charge_nameplate_cost,
+         discharge_capacity * storage.discharge_nameplate_cost])
     print """STORAGE: %s
   Capacity: %.2f Megawatt-hours
   Maximum Charge Power: %.2f Megawatts
@@ -190,7 +190,7 @@ def display_lp_results(lp):
 def main():
 
   profiles_path = get_data_directory() + ['profiles', 'profiles_california.csv']
-  profiles_file = osp.join(profiles_path)
+  profiles_file = osp.join(*profiles_path)
 
   profiles = pd.read_csv(profiles_file, index_col=0, parse_dates=True)
   lp = simple_lp(profiles)

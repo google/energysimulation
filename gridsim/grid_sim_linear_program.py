@@ -481,7 +481,7 @@ class _GridSourceDispatchableSolver(object):
       # Constrain rps_credit if needed.
       if source.is_rps_source:
         lp.rps_source_constraints[source.grid_region_id][t].set_coefficient(
-            var, 1.0)
+            var, source.power_coefficient)
 
       # Ensure total energy is less than source.max_energy.
       if max_energy_constraint is not None:
@@ -545,7 +545,7 @@ class _GridSourceNonDispatchableSolver(object):
     if (profile.values == 0.0).all():
       raise ValueError('%s profile may not be all zero.' %source.name)
 
-    self.profile = profile / max(profile)
+    self.profile = source.power_coefficient * profile / max(profile)
 
   def configure_lp_variables_and_constraints(self, lp):
     """Declare lp variables, and set constraints in grid_source.
@@ -696,6 +696,10 @@ class GridStorage(object):
     max_storage: An optional float which represents the maximum energy
       that can be stored.  A value < 0 means there is no maximum
       storage limit.
+    is_rps: Boolean; if true, keeps track of rps_credit as storage is
+      charged / discharged.  Amount charging[t] is subtracted from
+      rps_credit[t] from rps_credit[t].  Amount discharging[t] is
+      added to rps_credit[t].  If false, no rps_credits are adjusted.
   """
 
   def __init__(
@@ -706,7 +710,245 @@ class GridStorage(object):
       charge_nameplate_cost=0.0,
       discharge_nameplate_cost=0.0,
 
-      grid_region_id=0.0,
+      grid_region_id=0,
+
+      charge_efficiency=1.0,
+      storage_efficiency=1.0,
+      discharge_efficiency=1.0,
+
+      max_charge_power=-1,
+      max_discharge_power=-1,
+      max_storage=-1,
+      is_rps=False
+  ):
+
+    self.name = name
+    self.storage_nameplate_cost = storage_nameplate_cost
+    self.charge_nameplate_cost = charge_nameplate_cost
+    self.discharge_nameplate_cost = discharge_nameplate_cost
+
+    self.grid_region_id = grid_region_id
+    self.charge_efficiency = charge_efficiency
+    self.storage_efficiency = storage_efficiency
+    self.discharge_efficiency = discharge_efficiency
+
+    self.max_charge_power = max_charge_power
+    self.max_discharge_power = max_discharge_power
+    self.max_storage = max_storage
+    self.is_rps = is_rps
+
+    # Sink is a power element which sinks from the grid into storage.
+    # Source is a power element which sources to the grid from storage.
+    # Both are constructed in configure_lp_variables_and_constraints
+
+    self.sink = None
+    self.source = None
+
+  def configure_lp_variables_and_constraints(self, lp):
+    """Declare lp variables, and set constraints.
+
+    Args:
+      lp: LinearProgramContainer, contains lp solver and constraints.
+    """
+
+    # Set up LP variables.
+    self.energy_variables = lp.declare_timeslice_variables(
+        self.name,
+        self.grid_region_id
+    )
+
+    if self.storage_nameplate_cost:
+      self.energy_nameplate = lp.declare_nameplate_variable(
+          self.name,
+          self.grid_region_id
+      )
+
+    # Set up source and configure LP variables.
+    self.source = GridSource(
+        name=self.name + ' source',
+        nameplate_unit_cost=self.discharge_nameplate_cost,
+        variable_unit_cost=0.0,
+        grid_region_id=self.grid_region_id,
+        max_power=self.max_discharge_power,
+        co2_per_electrical_energy=0.0,
+        power_coefficient=self.discharge_efficiency,
+        is_rps_source=self.is_rps
+    )
+    self.source.solver = _GridSourceDispatchableSolver(self.source)
+    self.source.configure_lp_variables_and_constraints(lp)
+
+    # Set up sink and configure LP variables.
+    self.sink = GridSource(
+        name=self.name + ' sink',
+        nameplate_unit_cost=self.discharge_nameplate_cost,
+        variable_unit_cost=0.0,
+        grid_region_id=self.grid_region_id,
+        max_power=self.max_charge_power,
+        co2_per_electrical_energy=0.0,
+        power_coefficient=-1.0,
+        is_rps_source=self.is_rps
+    )
+    self.sink.solver = _GridSourceDispatchableSolver(self.sink)
+    self.sink.configure_lp_variables_and_constraints(lp)
+
+    # Add energy nameplate costs to the objective.  Other costs are
+    # added by source/sink.configure_lp_variables_and_constraints.
+    if self.storage_nameplate_cost:
+      nameplate = self.energy_nameplate
+      lp.minimize_costs_objective.set_coefficient(nameplate,
+                                                  self.storage_nameplate_cost)
+
+    # Constrain Energy Storage to be Energy Last time plus sink minus source.
+    # Storage is circular so variables at t=0 depend on variables at t=-1
+    # which is equivalent to last value in python indexing scheme.
+    variables = self.energy_variables
+    for t in lp.time_index_iterable:
+      # Ce = charge_efficiency,
+      # Se = storage_efficiency.
+      # Stored[i] = se * Stored[i-1] + ce * sink[i-1] - source[i-1]
+      # 0 = -Stored[i] + se * Stored[i-1] + ce * sink[i-1] - source[i-1]
+      c = lp.constraint(0.0, 0.0)
+      c.set_coefficient(variables[t], -1.0)   # -Stored[i]
+      c.set_coefficient(variables[t - 1], self.storage_efficiency)
+
+      # Source and sink are relative to the grid, so opposite here:
+      # Sink adds to storage, source subtracts from storage.
+      c.set_coefficient(self.source.timeslice_variables[t - 1], -1.0)
+      c.set_coefficient(self.sink.timeslice_variables[t - 1],
+                        self.charge_efficiency)
+
+      # Ensure nameplate is larger than stored_value.
+      if self.storage_nameplate_cost:
+        nameplate_constraint = lp.constraint(0.0, lp.solver.infinity())
+        nameplate_constraint.set_coefficient(nameplate, 1.0)
+        nameplate_constraint.set_coefficient(variables[t], -1.0)
+
+      # Constrain maximum storage if max_storage >= 0
+      if self.max_storage >= 0.0:
+        max_storage_constraint = lp.constraint(0.0, self.max_storage)
+        max_storage_constraint.set_coefficient(variables[t], 1.0)
+
+  def post_process(self, lp):
+    """Update lp post_processing result variables.
+
+    This is done post lp.solve() so that sanity data checks can be done
+    on RPS before returning results.
+
+    Args:
+      lp: The LinearProgramContainer where the post processing variables reside.
+    """
+
+    sink_vals = self.sink.get_solution_values()
+    source_vals = (self.source.get_solution_values() *
+                   self.discharge_efficiency)
+
+    if self.is_rps:
+      lp.rps_total[self.grid_region_id] += source_vals - sink_vals
+    else:
+      lp.non_rps_total[self.grid_region_id] += source_vals - sink_vals
+
+  def get_nameplate_solution_value(self):
+    """Gets the linear program solver results for nameplate.
+
+    Must be called after lp.solve() to ensure solver has properly
+    converged and has generated results.
+
+    Raises:
+      RuntimeError: If called before LinearProgramContainer.solve().
+
+    Returns:
+      Float value representing solved nameplate value.
+
+    """
+    if self.storage_nameplate_cost:
+      nameplate_variable = self.energy_nameplate
+
+      if nameplate_variable is None:
+        raise RuntimeError(
+            'Get_nameplate_solution_value called before solve().')
+
+      return nameplate_variable.solution_value()
+    else:
+      return max(self.get_solution_values())
+
+  def get_solution_values(self):
+    """Gets the linear program solver results.
+
+    Must be called after lp.solve() to ensure solver has properly
+    converged and has generated results.
+
+    Raises:
+      RuntimeError: If called before LinearProgramContainer.solve().
+
+    Returns:
+      np.array of solutions for each timeslice variable.
+
+    """
+
+    timeslice_variables = self.energy_variables
+
+    if timeslice_variables is None:
+      raise RuntimeError('get_solution_values called before solve.')
+
+    return np.array([v.solution_value()
+                     for v in timeslice_variables])
+
+
+class GridRecStorage(object):
+  """Stores energy from the grid and returns it when needed subject to losses.
+
+  This is a wrapper around two GridStorage objects, one which stores
+  "clean" energy (is_rps) and one which stores "dirty" energy (not
+  is_rps).  There is a need for both types of storage to keep track of
+  renewable energy credits.
+
+  Attributes:
+    name: A string which is the name of the object.
+    storage_nameplate_cost: A float which is the cost per nameplate of
+      energy storage.  E.g. The cost of batteries.
+    charge_nameplate_cost: A float which is the cost per nameplate
+      power to charge the storage.  E.g. The rectifier cost to convert
+      an AC grid to DC storage.
+    discharge_nameplate_cost: A float which is the cost per nameplate
+      power to recharge the grid.  E.g. The cost of a power inverter to
+      convert DC storage back to AC
+    grid_region_id: An int specifying the grid region of the storage.
+      The storage can only store energy generated by sources with the
+      same grid_region_id.  Only demands with the same grid_region_id
+      can sink power from this.
+    charge_efficiency: A float ranging from 0.0 - 1.0 which describes
+      the energy loss between the grid and the storage element.  0.0
+      means complete loss, 1.0 means no loss.
+    storage_efficiency: A float ranging from 0.0 - 1.0 which describes
+      how much stored energy remains from previous stored energy after
+      one time-cycle.  1.0 means no loss. 0.0 means all stored energy
+      is lost.
+    discharge_efficiency: A float ranging from 0.0 - 1.0 which describes
+      the energy loss between storage and grid when recharging the grid.
+      0.0 means complete loss, 1.0 means no loss.
+    max_charge_power: A float which represents the maximum power that
+      can charge storage (calculated before any efficiency losses.).
+      A value < 0 means there is no charge power limit.
+    max_discharge_power: A float which represents the maximum power
+      that can discharge storage (calculated before any efficiency
+      losses.).  A value < 0 means there is no discharge power limit.
+    max_storage: An optional float which represents the maximum energy
+      that can be stored.  A value < 0 means there is no maximum
+      storage limit.
+
+    rec_storage: GridStorage object which stores "clean" energy.
+    no_rec_storage: GridStorage object which stores "dirty" energy.
+  """
+
+  def __init__(
+      self,
+      name,
+
+      storage_nameplate_cost,
+      charge_nameplate_cost=0.0,
+      discharge_nameplate_cost=0.0,
+
+      grid_region_id=0,
 
       charge_efficiency=1.0,
       storage_efficiency=1.0,
@@ -731,19 +973,39 @@ class GridStorage(object):
     self.max_discharge_power = max_discharge_power
     self.max_storage = max_storage
 
-    # Sink is a power element which sinks from the grid into storage.
-    # Source is a power element which sources to the grid from storage.
-    # Both are constructed in configure_lp_variables_and_constraints
-
-    self.sink = None
-    self.source = None
+    self.rec_storage = None
+    self.no_rec_storage = None
 
   def configure_lp_variables_and_constraints(self, lp):
-    """Declare lp variables, and set constraints.
+    """Declare lp variables, and set constraints."""
 
-    Args:
-      lp: LinearProgramContainer, contains lp solver and constraints.
-    """
+    # For rec_storage and no_rec_storage storage, set all costs to 0
+    # and with no limits.  Calculate costs and limits after
+    # declaration.
+
+    self.rec_storage = GridStorage(
+        name=self.name+' REC_STORAGE',
+        storage_nameplate_cost=0,
+        grid_region_id=self.grid_region_id,
+        charge_efficiency=self.charge_efficiency,
+        discharge_efficiency=self.discharge_efficiency,
+        storage_efficiency=self.storage_efficiency,
+        is_rps=True)
+
+    self.no_rec_storage = GridStorage(
+        name=self.name+' NO_REC_STORAGE',
+        storage_nameplate_cost=0,
+        grid_region_id=self.grid_region_id,
+        charge_efficiency=self.charge_efficiency,
+        discharge_efficiency=self.discharge_efficiency,
+        storage_efficiency=self.storage_efficiency,
+        is_rps=False)
+
+    self.rec_storage.configure_lp_variables_and_constraints(lp)
+    self.no_rec_storage.configure_lp_variables_and_constraints(lp)
+
+    # Calculate costs and limits based on the sum of both rec_storage
+    # and no_rec_storage.
 
     # Set up LP variables.
     self.energy_variables = lp.declare_timeslice_variables(
@@ -756,100 +1018,92 @@ class GridStorage(object):
         self.grid_region_id
     )
 
-    # Set up source and configure LP variables.
-    self.source = GridSource(
-        name=self.name + ' source',
-        nameplate_unit_cost=self.discharge_nameplate_cost,
-        variable_unit_cost=0.0,
-        grid_region_id=self.grid_region_id,
-        max_power=self.max_discharge_power,
-        co2_per_electrical_energy=0.0,
-        power_coefficient=self.discharge_efficiency,
-        is_rps_source=False
+    self.charge_nameplate = lp.declare_nameplate_variable(
+        self.name + ' charge nameplate',
+        self.grid_region_id
     )
-    self.source.solver = _GridSourceDispatchableSolver(self.source)
-    self.source.configure_lp_variables_and_constraints(lp)
 
-    # Set up sink and configure LP variables.
-    self.sink = GridSource(
-        name=self.name + ' sink',
-        nameplate_unit_cost=self.discharge_nameplate_cost,
-        variable_unit_cost=0.0,
-        grid_region_id=self.grid_region_id,
-        max_power=self.max_charge_power,
-        co2_per_electrical_energy=0.0,
-        power_coefficient=-1.0,
-        is_rps_source=False
+    self.discharge_nameplate = lp.declare_nameplate_variable(
+        self.name + ' discharge nameplate',
+        self.grid_region_id
     )
-    self.sink.solver = _GridSourceDispatchableSolver(self.sink)
-    self.sink.configure_lp_variables_and_constraints(lp)
 
-    # Add energy nameplate costs to the objective.  Other costs are
-    # added by source/sink.configure_lp_variables_and_constraints.
-    nameplate = self.energy_nameplate
-    lp.minimize_costs_objective.set_coefficient(nameplate,
+    # Set limits if needed.
+    if self.max_storage >= 0:
+      lp.constraint(0.0, self.max_storage).set_coefficient(
+          self.energy_nameplate, 1.0)
+
+    if self.max_charge_power >= 0:
+      lp.constraint(0.0, self.max_charge_power).set_coefficient(
+          self.charge_nameplate, 1.0)
+
+    if self.max_discharge_power >= 0:
+      lp.constraint(0.0, self.max_discharge_power).set_coefficient(
+          self.discharge_nameplate, 1.0)
+
+    # Add energy nameplate costs to the objective.
+    lp.minimize_costs_objective.set_coefficient(self.energy_nameplate,
                                                 self.storage_nameplate_cost)
+    lp.minimize_costs_objective.set_coefficient(self.charge_nameplate,
+                                                self.charge_nameplate_cost)
+    lp.minimize_costs_objective.set_coefficient(self.discharge_nameplate,
+                                                self.discharge_nameplate_cost)
 
-    # Constrain Energy Storage to be Energy Last time plus sink minus source.
-    # Storage is circular so variables at t=0 depend on variables at t=-1
-    # which is equivalent to last value in python indexing scheme.
-    variables = self.energy_variables
+    rec_storage_energy_variables = self.rec_storage.energy_variables
+    no_rec_storage_energy_variables = self.no_rec_storage.energy_variables
+
     for t in lp.time_index_iterable:
-      # Ce = charge_efficiency,
-      # Se = storage_efficiency.
-      # Stored[i] = se * Stored[i-1] + ce * sink[i-1] - source[i-1]
-      # 0 = -Stored[i] + se * Stored[i-1] + ce * sink[i-1] - source[i-1]
-      c = lp.constraint(0.0, 0.0)
-      c.set_coefficient(variables[t], -1.0)   # -Stored[i]
-      c.set_coefficient(variables[t - 1], self.storage_efficiency)
-
-      # Source and sink are relative to the grid, so opposite here:
-      # Sink adds to storage, source subtracts from storage.
-      c.set_coefficient(self.source.timeslice_variables[t - 1], -1.0)
-      c.set_coefficient(self.sink.timeslice_variables[t - 1],
-                        self.charge_efficiency)
-
-      # Ensure nameplate is larger than stored_value.
+      # Ensure nameplate is >= sum(stored_values)[t].
       nameplate_constraint = lp.constraint(0.0, lp.solver.infinity())
-      nameplate_constraint.set_coefficient(nameplate, 1.0)
-      nameplate_constraint.set_coefficient(variables[t], -1.0)
+      nameplate_constraint.set_coefficient(self.energy_nameplate, 1.0)
+      nameplate_constraint.set_coefficient(rec_storage_energy_variables[t],
+                                           -1.0)
+      nameplate_constraint.set_coefficient(no_rec_storage_energy_variables[t],
+                                           -1.0)
 
-      # Constrain maximum storage if max_storage >= 0
-      if self.max_storage >= 0.0:
-        max_storage_constraint = lp.constraint(0.0, self.max_storage)
-        max_storage_constraint.set_coefficient(variables[t], 1.0)
+      rec_storage_charge_variables = (
+          self.rec_storage.sink.timeslice_variables)
+      no_rec_storage_charge_variables = (
+          self.no_rec_storage.sink.timeslice_variables)
+      rec_storage_discharge_variables = (
+          self.rec_storage.source.timeslice_variables)
+      no_rec_storage_discharge_variables = (
+          self.no_rec_storage.source.timeslice_variables)
 
-      # Handle RPS Constraints.
-      rps_credit_lt_demand = lp.rps_demand_constraints[self.grid_region_id][t]
+      max_charge_constraint = lp.constraint(0.0, lp.solver.infinity())
+      max_charge_constraint.set_coefficient(self.charge_nameplate, 1.0)
+      max_charge_constraint.set_coefficient(
+          rec_storage_charge_variables[t], -1.0)
+      max_charge_constraint.set_coefficient(
+          no_rec_storage_charge_variables[t], -1.0)
+      max_charge_constraint.set_coefficient(
+          rec_storage_discharge_variables[t], 1.0)
+      max_charge_constraint.set_coefficient(
+          no_rec_storage_discharge_variables[t], 1.0)
 
-      source_var = self.source.timeslice_variables[t]
-      sink_var = self.sink.timeslice_variables[t]
+      max_discharge_constraint = lp.constraint(0.0, lp.solver.infinity())
+      max_discharge_constraint.set_coefficient(self.discharge_nameplate, 1.0)
+      max_discharge_constraint.set_coefficient(
+          rec_storage_charge_variables[t], 1.0)
+      max_discharge_constraint.set_coefficient(
+          no_rec_storage_charge_variables[t], 1.0)
+      max_discharge_constraint.set_coefficient(
+          rec_storage_discharge_variables[t], -1.0)
+      max_discharge_constraint.set_coefficient(
+          no_rec_storage_discharge_variables[t], -1.0)
 
-      # Source sources to the grid which lowers the headroom for rps_credits
-      # to account for demand.
-      rps_credit_lt_demand.set_coefficient(source_var,
-                                           self.source.power_coefficient)
+  def get_solution_values(self):
+    return (self.rec_storage.get_solution_values() +
+            self.no_rec_storage.get_solution_values())
 
-      # Sink sinks from the grid which increases the headroom for rps_credits
-      # to account for demand.
-      rps_credit_lt_demand.set_coefficient(sink_var,
-                                           self.sink.power_coefficient)
+  def get_source_solution_values(self):
+    return (self.rec_storage.source.get_solution_values() +
+            self.no_rec_storage.source.get_solution_values() -
+            self.rec_storage.sink.get_solution_values() -
+            self.no_rec_storage.sink.get_solution_values())
 
-  def post_process(self, lp):
-    """Update lp post_processing result variables.
-
-    This is done post lp.solve() so that sanity data checks can be done
-    on RPS before returning results.
-
-    Args:
-      lp: The LinearProgramContainer where the post processing variables reside.
-    """
-
-    sink_vals = self.sink.get_solution_values()
-    source_vals = (self.source.get_solution_values() *
-                   self.discharge_efficiency)
-
-    lp.adjusted_demand[self.grid_region_id] += (sink_vals - source_vals)
+  def get_sink_solution_values(self):
+    return -self.get_source_solution_values()
 
   def get_nameplate_solution_value(self):
     """Gets the linear program solver results for nameplate.
@@ -864,34 +1118,20 @@ class GridStorage(object):
       Float value representing solved nameplate value.
 
     """
-    nameplate_variable = self.energy_nameplate
+    if self.storage_nameplate_cost:
+      nameplate_variable = self.energy_nameplate
 
-    if nameplate_variable is None:
-      raise RuntimeError('Get_nameplate_solution_value called before solve().')
+      if nameplate_variable is None:
+        raise RuntimeError(
+            'Get_nameplate_solution_value called before solve().')
 
-    return nameplate_variable.solution_value()
+      return nameplate_variable.solution_value()
+    else:
+      return max(self.get_solution_values())
 
-  def get_solution_values(self):
-    """Gets the linear program solver results.
-
-    Must be called after lp.solve() to ensure solver has properly
-    converged and has generated results.
-
-    Raises:
-      RuntimeError: If called before LinearProgramContainer.solve().
-
-    Returns:
-      np.array of solutions for each timeslice variable.
-
-    """
-
-    timeslice_variables = self.energy_variables
-
-    if timeslice_variables is None:
-      raise RuntimeError('get_solution_values called before solve.')
-
-    return np.array([v.solution_value()
-                     for v in timeslice_variables])
+  def post_process(self, lp):
+    self.rec_storage.post_process(lp)
+    self.no_rec_storage.post_process(lp)
 
 
 class _GridTransmission(GridSource):
@@ -955,11 +1195,8 @@ class _GridTransmission(GridSource):
       # Whatever the super-class is sourcing in source_grid_region_id,
       # sink it from sink_grid_region_id.
       lp.conserve_power_constraint[sink_id][t].set_coefficient(var, -1.0)
-
-      # Adjust demand for rps credits.  See comment about RPS Constraint #3.
-      lp.rps_demand_constraints[sink_id][t].set_coefficient(var, -1.0)
-      lp.rps_demand_constraints[source_id][t].set_coefficient(
-          var, self.power_coefficient)
+      if self.is_rps_source:
+        lp.rps_source_constraints[sink_id][t].set_coefficient(var, -1.0)
 
   def post_process(self, lp):
     """Update lp post_processing result variables.
@@ -970,13 +1207,15 @@ class _GridTransmission(GridSource):
     Args:
       lp: The LinearProgramContainer where the post processing variables reside.
     """
+    # Normal source post_process
+    super(_GridTransmission, self).post_process(lp)
 
-    # Adjust source_grid_region_id demand down.
-    lp.adjusted_demand[self.grid_region_id] -= (self.get_solution_values() *
-                                                self.power_coefficient)
-
-    # Adjust sink_grid_region_id demand up.
-    lp.adjusted_demand[self.sink_grid_region_id] += self.get_solution_values()
+    # Sink post_process
+    sink_id = self.sink_grid_region_id
+    if lp.rps_percent > 0.0 and self.is_rps_source:
+      lp.rps_total[sink_id] -= self.get_solution_values()
+    else:
+      lp.non_rps_total[sink_id] -= self.get_solution_values()
 
 
 class GridTransmission(object):
@@ -998,10 +1237,14 @@ class GridTransmission(object):
       efficiency: (float) ratio of how much power gets moved one
         grid_region to the other grid_region. Acceptable values are
         0. < efficiency < 1.
-      a_to_b: _GridTransmission object which moves power from
+      a_to_b: _GridTransmission object which moves dirty power from
         grid_region_a to grid_region_b
-      b_to_a: _GridTransmission object which moves power from
+      b_to_a: _GridTransmission object which moves dirty power from
         grid_region_b to grid_region_a
+      rec_a_to_b: _GridTransmission object which moves clean power
+        from grid_region_a to grid_region_b
+      rec_b_to_a: _GridTransmission object which moves clean power
+        from grid_region_b to grid_region_a
   """
 
   def __init__(
@@ -1021,6 +1264,11 @@ class GridTransmission(object):
     self.efficiency = efficiency
     self.max_power = max_power
 
+    self.a_to_b = None
+    self.b_to_a = None
+    self.rec_a_to_b = None
+    self.rec_b_to_a = None
+
   def configure_lp_variables_and_constraints(self, lp):
     """Declare lp variables, and set constraints.
 
@@ -1028,23 +1276,8 @@ class GridTransmission(object):
       lp: LinearProgramContainer, contains lp solver and constraints.
     """
 
-    # Nameplate cost is calculated in a_to_b object only.  This
-    # assumes that transmission is bidirectional, but has no (or
-    # epsilon) additional cost to send power in the opposite
-    # direction.
-
-    # Below, we add a constraint that:
-    #
-    # a_to_b_nameplate >= b_to_a_nameplate
-    #
-    # so a_to_b_nameplate always reflects the appropriate capacity of
-    # the transmission lines and:
-    #
-    # total cost = nameplate_unit_cost * a_to_b_nameplate.
-    #
-
     self.a_to_b = _GridTransmission(self.name + ' a_to_b',
-                                    self.nameplate_unit_cost,
+                                    0,
                                     self.grid_region_id_b,
                                     self.grid_region_id_a,
                                     self.max_power,
@@ -1057,15 +1290,60 @@ class GridTransmission(object):
                                     self.max_power,
                                     self.efficiency)
 
+    self.rec_a_to_b = _GridTransmission(self.name + ' rec a_to_b',
+                                        0,
+                                        self.grid_region_id_b,
+                                        self.grid_region_id_a,
+                                        self.max_power,
+                                        self.efficiency,
+                                        is_rps=True)
+
+    self.rec_b_to_a = _GridTransmission(self.name + ' rec b_to_a',
+                                        0,
+                                        self.grid_region_id_a,
+                                        self.grid_region_id_b,
+                                        self.max_power,
+                                        self.efficiency,
+                                        is_rps=True)
+
     self.a_to_b.configure_lp_variables_and_constraints(lp)
     self.b_to_a.configure_lp_variables_and_constraints(lp)
+    self.rec_a_to_b.configure_lp_variables_and_constraints(lp)
+    self.rec_b_to_a.configure_lp_variables_and_constraints(lp)
 
-    # Make sure a_to_b nameplate >= b_to_a nameplate so capacity is
-    # sized appropriately for costing.
+    # Make sure nameplate >= sum(a_to_b) and nameplate >= sum(b_to_a)
 
-    constraint = lp.constraint(0.0, lp.solver.infinity())
-    constraint.set_coefficient(self.b_to_a.nameplate_variable, -1.0)
-    constraint.set_coefficient(self.a_to_b.nameplate_variable, 1.0)
+    self.nameplate_variable = lp.declare_nameplate_variable(
+        self.name, '%d_%d' % (self.grid_region_id_a, self.grid_region_id_b))
+
+    lp.minimize_costs_objective.set_coefficient(self.nameplate_variable,
+                                                self.nameplate_unit_cost)
+
+    for t in lp.time_index_iterable:
+
+      # nameplate >= a_to_b[t] + rec_a_to_b[t] - b_to_a[t] - rec_b_to_a[t]
+      a_to_b_constraint = lp.constraint(0.0, lp.solver.infinity())
+      a_to_b_constraint.set_coefficient(self.nameplate_variable, 1.0)
+      a_to_b_constraint.set_coefficient(
+          self.a_to_b.timeslice_variables[t], -1.0)
+      a_to_b_constraint.set_coefficient(
+          self.rec_a_to_b.timeslice_variables[t], -1.0)
+      a_to_b_constraint.set_coefficient(
+          self.b_to_a.timeslice_variables[t], 1.0)
+      a_to_b_constraint.set_coefficient(
+          self.rec_b_to_a.timeslice_variables[t], 1.0)
+
+      # nameplate >= b_to_a[t] + rec_b_to_a[t] - a_to_b[t] - rec_a_to_b[t]
+      b_to_a_constraint = lp.constraint(0.0, lp.solver.infinity())
+      b_to_a_constraint.set_coefficient(self.nameplate_variable, 1.0)
+      b_to_a_constraint.set_coefficient(
+          self.b_to_a.timeslice_variables[t], -1.0)
+      b_to_a_constraint.set_coefficient(
+          self.rec_b_to_a.timeslice_variables[t], -1.0)
+      b_to_a_constraint.set_coefficient(
+          self.a_to_b.timeslice_variables[t], 1.0)
+      b_to_a_constraint.set_coefficient(
+          self.rec_a_to_b.timeslice_variables[t], 1.0)
 
   def post_process(self, lp):
     """Update lp post_processing result variables.
@@ -1079,6 +1357,28 @@ class GridTransmission(object):
 
     self.a_to_b.post_process(lp)
     self.b_to_a.post_process(lp)
+    self.rec_a_to_b.post_process(lp)
+    self.rec_b_to_a.post_process(lp)
+
+  def get_nameplate_solution_value(self):
+    """Gets the linear program solver results for nameplate.
+
+    Must be called after lp.solve() to ensure solver has properly
+    converged and has generated results.
+
+    Raises:
+      RuntimeError: If called before LinearProgramContainer.solve().
+
+    Returns:
+      Float value representing solved nameplate value.
+
+    """
+    nameplate_variable = self.nameplate_variable
+
+    if nameplate_variable is None:
+      raise RuntimeError('Get_nameplate_solution_value called before solve().')
+
+    return nameplate_variable.solution_value()
 
 
 class LinearProgramContainer(object):
@@ -1114,9 +1414,7 @@ class LinearProgramContainer(object):
 
       rps_demand_constraints: Dict keyed by grid_region_id.  Value is
         a list of LP Constraints which ensures that
-        rps_credit[grid_region, t] <= demand[grid_region, t] +
-                                      sum(storage_sinks[grid_region, t]) -
-                                      sum(storage_sources[grid_region, t])
+        rps_credit[grid_region, t] <= demand[grid_region, t]
 
     RPS Variables:
       rps_credit_variables: Dict object keyed by grid_region_id.  Value is a
@@ -1130,10 +1428,7 @@ class LinearProgramContainer(object):
         (GridSource_power[grid_region, t]) of all non_rps sources.
 
       adjusted_demand: Dict object keyed by grid_region_id.  Value is
-        Demand[grid_region, t] + sum(storage_sink[grid_region, t]) -
-        sum(storage_source[grid_region, t]) +
-        sum(transmission_sink(grid_region, t)) -
-        sum(transmission_source(grid_region, t))
+        Demand[grid_region, t]
 
       rps_credit_values: Dict object keyed by grid_region_id.  Value is
         rps_credit.value[grid_region, t]
@@ -1180,6 +1475,9 @@ class LinearProgramContainer(object):
     self.rps_total = {}
     self.non_rps_total = {}
     self.adjusted_demand = {}
+    self.total_demand = 0
+    self.rps_demand = 0
+
     self.rps_credit_values = {}
 
     self.demands = []
@@ -1302,6 +1600,7 @@ class LinearProgramContainer(object):
     for d in self.demands:
       try:
         profiles = self.profiles[d.name]
+        self.adjusted_demand[d.grid_region_id] = np.array(profiles.values)
       except KeyError:
         profile_names = str(self.profiles.keys())
         error_string = 'GridDemand %s. No profile found! Known profiles:(%s)' %(
@@ -1334,34 +1633,28 @@ class LinearProgramContainer(object):
     #   total_rps_credit >= (self.rps_percent / 100) * total_demand
     #
     # Constraint #2:
-    # rps_credit[g][t] cannot exceed sum of rps_sources at each g,t.
-    # This is reflected in the constraint named
+    # rps_credit[g][t] cannot exceed sum of rps_sources - sum of
+    # rps_sinks at each g,t.  An example of rps_sink is the 'REC_STORAGE'
+    # part of GridRecStorage which stores rps energy off the grid only
+    # to put it back on the grid later as a rps_source.  This is
+    # reflected in the constraint named
     # rps_source_constraints[g][t]:
-    #   rps_credit[g][t] <= sum(rps_sources[g][t])
+    #   rps_credit[g][t] <= sum(rps_sources[g][t]) - sum(rps_sinks[g][t])
     #
     # Constraint #3
     # rps_credit[g][t] cannot exceed what can be used at each g,t.  if
     # rps_sources generate a Gigawatt at g,t = 0,0 and only 1MW can be
     # used at g,t then we don't want to credit the unused 999 MW.
     #
-    # Given that:
-    #   useable_power := demand[g][t] +
-    #     (storage_charge[g][t] - storage_discharge[g][t]) +
-    #     (transmission_sending[g][t] - transmission_receiving[g][t])
-    #
-    #     Where:
-    #       storage_charge is energy used to charge storage.
-    #       storage_discharge is energy put on grid g at time t.
-    #       transmission_sending is energy sent from grid g at time t
-    #       transmission_receiving is energy put on grid g at time t
-    #
     # The constraint named rps_demand_constraints is:
-    #   rps_credit[g][t] <= useable_power
+    #   rps_credit[g][t] <= demand[g][t]
     #
 
+    self.total_demand = demand_sum
+    self.rps_demand = demand_sum * self.rps_percent / 100.
     solver = self.solver
     total_rps_credit_gt_rps_percent_constraint = self.constraint(
-        (self.rps_percent * demand_sum) / 100,
+        self.rps_demand,
         solver.infinity()
     )
 
@@ -1394,19 +1687,6 @@ class LinearProgramContainer(object):
             rps_credit_variables[t], 1.0)
 
         # Rps_credit[grid_region, t] <= demand[grid_region, t].
-        # Constraint also gets adjusted:
-        #   - down by storage_sink[t]
-        #   - up by storage_source[t]
-        #   - down by transmission_sink[t]
-        #   - up by transmission_source[t]
-        #
-        # GridStorage.configure_lp_variables_and_constraints.
-        #
-        # Constraint ranges from -inf to demand[t] which allows
-        # storage to charge (sink) as much energy as it can while
-        # requiring that storage discharge no more than demanded and
-        # alternatively sourced at any time t.
-
         rps_credit_less_than_demand = self.constraint(-solver.infinity(),
                                                       profiles[t])
         rps_credit_less_than_demand.set_coefficient(rps_credit_variables[t],
@@ -1452,20 +1732,12 @@ class LinearProgramContainer(object):
     """
 
     # Initialize post_processing totals.
-    total_demand = 0
     for d in self.demands:
 
       # Total amount of rps_sources[g][t] power.
       self.rps_total[d.grid_region_id] = np.zeros(self.number_of_timeslices)
       # Total amount of non-rps_sources[g][t] power.
       self.non_rps_total[d.grid_region_id] = np.zeros(self.number_of_timeslices)
-
-      # Total demand[g][t].  Demand gets adjusted down by
-      # storage/transmission sinks and adjusted up by
-      # storage/transmission sources to represent the useful power[g][t]
-      demand_profile = self.profiles[d.name].values
-      self.adjusted_demand[d.grid_region_id] = np.array(demand_profile)
-      total_demand += sum(demand_profile)
 
     for s in self.sources + self.storage + self.transmission:
       s.post_process(self)
@@ -1512,21 +1784,15 @@ class LinearProgramContainer(object):
         raise StorageExceedsDemandError(
             'Storage Exceeds Demand for region %d' %g_id)
 
-      # Now make sure adjusted_demand is not less than 0.0 which it
-      # might be due to solver precision mismatch.
-      self.adjusted_demand[g_id] *= self.adjusted_demand[g_id] >= 0.0
-
-    rps_target = total_demand * self.rps_percent / 100
-
     # Scale solver_precision by number of timeslices to get precision
     # for a summed comparison.
     sum_solver_precision = solver_precision * self.number_of_timeslices
-    if sum_solver_precision + sum_rps_credits < rps_target:
+    if sum_solver_precision + sum_rps_credits < self.rps_demand:
       raise RpsPercentNotMetError(
           'Sum RPS credits (%f) < demand * (%f rps_percent) (%f)' %(
               sum_rps_credits,
               float(self.rps_percent),
-              rps_target
+              self.rps_demand
           )
       )
 
@@ -1569,7 +1835,8 @@ class LinearProgramContainer(object):
 
     Args:
       name: String to be included in the generated variable name.
-      grid_region_id: Int which identifies which grid these variables affect.
+      grid_region_id: Stringifyable object which identifies which grid
+        these variables affect.
 
     Do Not call this function with the same (name, grid_region_id)
     pair more than once.  There may not be identically named variables

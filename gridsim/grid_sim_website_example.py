@@ -285,7 +285,7 @@ def configure_sources_and_storage(profile_directory,
 
   for storage_name in storage_names:
     dataframe_row = storage_dataframe.loc[storage_name]
-    storage = gslp.GridStorage(
+    storage = gslp.GridRecStorage(
         name=storage_name,
         storage_nameplate_cost=dataframe_row['fixed'],
         charge_nameplate_cost=dataframe_row['charge_capital'],
