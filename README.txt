@@ -33,6 +33,22 @@ Dependencies:
   everything except for ortools.  Since the recent bundles of ortools
   were in egg form, installing ortools via easy-install proved a
   suitable workaround for this problem.
+
+  To install, type:
+  $ cd <cloned gridsim directory>
+  $ python setup.py sdist
+  $ pip install dist/gridsim-1.0.0.tar.gz
+
+  And then if ortools doesn't install properly:
+  $ easy_install ortools
+
+  To run simple example:
+  $ cd gridsim
+  $ python grid_sim_simple_example.py
+
+  To run an example more like those calculated on the website:
+  $ cd gridsim
+  $ python grid_sim_website_example.py
   
 ===========
 Source Tree
@@ -78,16 +94,16 @@ Source Tree
       fixed: Combination of capital and yearly fixed operating costs per
       Megawatt-hour of capacity.
 
-      charge_efficiency: What fraction of energy gets stored during charging
+      charge_efficiency: What fraction of energy gets stored during charging.
 
       discharge_efficiency: What fraction of energy gets put back on the
       grid during discharge.
 
       charge_capital: Combination of capital and yearly fixed
-      operating costs per Megawatt of charging capacity
+      operating costs per Megawatt of charging capacity.
 
       discharge_capital: Combination of capital and yearly fixed
-      operating costs per Megawatt of discharging capacity
+      operating costs per Megawatt of discharging capacity.
       
 
 
