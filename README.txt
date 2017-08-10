@@ -15,7 +15,7 @@ technologies and policies using DOSCOE by John C. Platt and J. Orion
 Pritchard".
 
 It is also the basis for data shown on the website
-http://energystrategies.org
+https://goo.gl/BTtZYl
 
 ===========
 Installation
@@ -62,7 +62,7 @@ Source Tree
       cost sliders in the website.  Some additional sources are
       included here which ultimately were not shown on the website.
       For the website, all Carbon Capture and Sequestration (CCS) was
-      done using <SOURCE_TYPE>_CRYO_<COST_INDEX>.  Columns are
+      done using <SOURCE_TYPE>_CRYO_<COST_INDEX>.  Columns are:
 
       CO2: CO2 tonnes emitted per Megawatt of energy.
 
@@ -71,7 +71,23 @@ Source Tree
 
       variable: Costs per Megawatt-hour of generation. Primarily fuel costs.
 
-    - storage_costs.csv: (TODO:(orionp) add storage costs.)
+    - storage_costs.csv: storage costs.  Rows are of the form
+      <STORAGE_TYPE>.  For the website, all storage assumed
+      ELECTROCHEMICAL (i.e. lithium batteries) Colums are:
+
+      fixed: Combination of capital and yearly fixed operating costs per
+      Megawatt-hour of capacity.
+
+      charge_efficiency: What fraction of energy gets stored during charging
+
+      discharge_efficiency: What fraction of energy gets put back on the
+      grid during discharge.
+
+      charge_capital: Combination of capital and yearly fixed
+      operating costs per Megawatt of charging capacity
+
+      discharge_capital: Combination of capital and yearly fixed
+      operating costs per Megawatt of discharging capacity
       
 
 
